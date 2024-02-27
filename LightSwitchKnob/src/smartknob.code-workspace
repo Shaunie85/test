@@ -1,0 +1,16 @@
+{
+	"folders": [
+		{
+			"path": "../../../ClonedRepos/smartknob"
+		},
+		{
+			"name": "smartknob_test",
+			"path": "../../../VisualStudio/smartknob_test"
+		},
+		{
+			"name": "LightSwitchKnob",
+			"path": ".."
+		}
+	],
+	"settings": {}
+}

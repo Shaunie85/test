@@ -1,0 +1,221 @@
+#include <Arduino.h>
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include <EEPROM.h>
+#include <TFT_eSPI.h>
+#include <HX711.h>
+#include "util.h"
+#include "BLDCMotor.h"
+#include "drivers/BLDCDriver6PWM.h"
+#include "mt6701_sensor.h"
+// #include "configuration.h"
+#include <pb.h>
+#include <HTTPClient.h>
+#include <Wire.h>
+
+const int buttonPin = 4;  // Pin connected to the button
+int previousButtonState = HIGH;
+
+const char* ssid = "FRITZ!Box6591CableMH";      //  your network SSID (name)
+const char* password = "76111069267883455750";  // your network password (use for WPA, or use as key for WEP)
+const char* mqttBroker = "192.168.178.74";
+const int mqttPort = 1883;
+const char* mqttClientID = "ESP32Client";
+const char* mqttUsername = "PLS";
+const char* mqttPassword = "Kathi16,3";
+
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+struct Shelly {
+  int RELAY;
+  int Switch;
+};
+
+//---------------------------------------------------------------------------------------------------------
+int connectToWiFi();
+void connectToMQTTBroker();
+void subscribeToTopic(const char* topic);
+void callback(char* topic, byte* payload, unsigned int length);
+void FilterJson(String inputString);
+int findNextComma(const String& str, int startPos);
+void Toggle(const char* toggleTopic);
+
+// List of MQTT topics to subscribe to
+const char* mqttTopics[] = {
+  "devices/Shelly0",
+  "devices/Shelly1",
+  "devices/Shelly2",
+  "devices/Shelly3",
+  "devices/Shelly4",
+  "devices/Shelly5",
+  "devices/Shelly6",
+  "devices/Shelly7",
+  "devices/Shelly8",
+  "devices/Shelly9",
+};
+
+const char* mqttTopicsSender[] = {
+  "shelly1mini-348518deeb8c",       // Fabi Zimmer      .23 0
+  "shelly1mini-348518e0cd74",       // Kathi Zimmer     .43 1
+  "shellyplus1-b8d61a8578e4",       // Fernseher        .44 2
+  "shelly1mini-348518ded850",       // Treppe           .49 3
+  "shelly1mini-348518e07734",       // Gang             .51 4
+  "shelly1mini-348518de8a6c",       // Gang Küche       .52 5
+  "shelly1mini-348518e07610",       // Schlafzimmer     .54 6
+  "shellyplus2pm-3ce90e2f1550",     // Esszimmer        .56 7
+  "shelly1mini-348518de7b80",       // Küche            .61 8
+  "shellyplusplugs-d4d4daf4d504",   // Arbeitsplatte    .81 9
+};
+
+const char* topic_suffix = "/#";
+const char* trans_suffix = "/rpc";
+const char* toggle = "{\"id\":123, \"src\":\"user_1\", \"method\":\"Switch.Toggle\", \"params\":{\"id\":0}}";   //id durch RELAY Wert ersetzen
+Shelly PLS[10];
+
+//---------------------------------------------------------------------------------------------------------
+void(* resetFunc)(void) =0;
+
+//---------------------------------------------------------------------------------------------------------
+void setup() {
+  Serial.begin(921600);
+  pinMode(buttonPin, INPUT);
+  // Connect to Wi-Fi
+  int not_conn = connectToWiFi();
+  if (not_conn != 0) {
+    resetFunc();
+  }
+  // Connect to MQTT broker
+  connectToMQTTBroker();
+
+  // Subscribe to MQTT topics
+  for (int i = 0; i < sizeof(mqttTopics) / sizeof(mqttTopics[0]); i++) {
+    int combinedLength = strlen(mqttTopics[i]) + strlen(topic_suffix) + 1;
+    char combined[combinedLength];
+    strcpy(combined, mqttTopics[i]);
+    strcat(combined, topic_suffix);
+    subscribeToTopic(combined);
+  }
+  Serial.println("Fertig");
+}
+
+//---------------------------------------------------------------------------------------------------------
+void loop() {
+  client.loop();
+  
+}
+
+//---------------------------------------------------------------------------------------------------------
+int connectToWiFi() {
+  int i = 0;
+  Serial.print("Connecting to Wi-Fi");
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.print(".");
+    i++;
+    if (i >= 6) {
+      return i;
+    }
+  }
+
+  Serial.println("\nConnected to Wi-Fi");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+  return 0;
+}
+
+//---------------------------------------------------------------------------------------------------------
+void connectToMQTTBroker() {
+  client.setServer(mqttBroker, mqttPort);
+  client.setCallback(callback);
+  while (!client.connected()) {
+    Serial.println("Connecting to MQTT Broker...");
+
+    if (client.connect("ESP8266Client", "PLS", "Kathi16,3")) {
+      Serial.println("Connected to MQTT Broker");
+    } else {
+      Serial.print("Failed to connect to MQTT Broker, rc=");
+      Serial.print(client.state());
+      Serial.println(" Retrying in 5 seconds...");
+      delay(5000);
+    }
+  }
+}
+
+//---------------------------------------------------------------------------------------------------------
+void subscribeToTopic(const char* topic) {
+  if (client.subscribe(topic)) {
+    Serial.print("Subscribed to topic: ");
+    Serial.println(topic);
+  } else {
+    Serial.print("Failed to subscribe to topic: ");
+    Serial.println(topic);
+  }
+}
+
+//---------------------------------------------------------------------------------------------------------
+void callback(char* topic, byte* payload, unsigned int length) {
+  //  Serial.print("Received message on topic: ");
+  //  Serial.println(topic);
+  String JsonMessage;
+  for (int i = 0; i < length; i++) {
+    JsonMessage += (char)payload[i];
+  }
+  FilterJson(JsonMessage);
+  //Serial.println(JsonMessage);
+}
+
+//---------------------------------------------------------------------------------------------------------
+void FilterJson(String inputString) {
+  // Search for the expressions '"SHELLY":', '"RELAY":', '"SWITCH":' in the input string
+  int shellyPosition = inputString.indexOf("\"SHELLY\":");
+  int relayPosition = inputString.indexOf("\"RELAY\":");
+  int switchPosition = inputString.indexOf("\"SWITCH\":");
+
+  // Find the position of the next comma after each expression
+  int shellyEndPosition = findNextComma(inputString, shellyPosition + 9);
+  int relayEndPosition = findNextComma(inputString, relayPosition + 6);
+  int switchEndPosition = findNextComma(inputString, switchPosition + 9);
+
+  int shelly = 0;
+  int relay = 0;
+  int Switch = 0;
+
+  // Process "SHELLY": expression
+  if (shellyPosition != -1 && shellyEndPosition != -1) {
+    shelly = (inputString.substring(shellyPosition + 9, shellyEndPosition)).toInt();
+    Serial.print(shelly);
+    Serial.print(" ");
+  }
+  if (relayPosition != -1 && relayEndPosition != -1) {
+    relay = (inputString.substring(relayPosition + 6, relayEndPosition)).toInt();
+    PLS[shelly].RELAY = relay;
+    Serial.print(PLS[shelly].RELAY);
+    Serial.print(" ");
+  }
+  if (switchPosition != -1 && switchEndPosition != -1) {
+    Switch = (inputString.substring(switchPosition + 9, switchEndPosition)).toInt();
+    PLS[shelly].Switch = Switch;
+    Serial.println(PLS[shelly].Switch);
+  }
+}
+
+//---------------------------------------------------------------------------------------------------------
+// Function to find the position of the next comma after a given position
+int findNextComma(const String& str, int startPos) {
+  return str.indexOf(',', startPos);
+}
+
+//---------------------------------------------------------------------------------------------------------
+void Toggle(const char* toggleTopic) {
+  Serial.println(toggleTopic);
+  int combinedLength = strlen(toggleTopic) + strlen(trans_suffix) + 1;
+  char combined[combinedLength];
+  strcpy(combined, toggleTopic);
+  Serial.println(combined);
+  strcat(combined, trans_suffix);
+  Serial.println(combined);
+  client.publish(combined, toggle);
+}
